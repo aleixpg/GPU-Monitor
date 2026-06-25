@@ -1,11 +1,17 @@
-# GPU Monitor
+# GPU Monitor ![Platform](https://img.shields.io/badge/macOS-14%2B-blue) ![Swift](https://img.shields.io/badge/Swift-5.9-orange) ![License](https://img.shields.io/badge/license-MIT-green)
 This app was vibecoded on my local AI rig running Qwen 3.6 27B. I built it to keep a close eye on my GPU's performance during intensive, all-day workloads. Contributions, issues, and PRs are highly welcome!
 
 macOS menu bar app that displays real-time GPU temperature, power draw, and memory usage from a remote NVIDIA server — connected via SSH.
 
 No external dependencies. Pure Swift + AppKit + SwiftUI.
 
-![Platform](https://img.shields.io/badge/macOS-14%2B-blue) ![Swift](https://img.shields.io/badge/Swift-5.9-orange) ![License](https://img.shields.io/badge/license-MIT-green)
+Compact version:
+
+<img width="128" height="27" alt="image" src="https://github.com/user-attachments/assets/9ae6a5a0-0f35-4c3a-8821-1d234a0e3574" />
+
+Full version:
+
+<img width="272" height="25" alt="image" src="https://github.com/user-attachments/assets/eff668e8-63fd-4bca-a797-812428178141" />
 
 ---
 
