@@ -120,12 +120,12 @@ To minimize overhead, GPU Monitor splits queries into two phases:
 
 **On connect (once):** Static metadata that doesn't change
 ```bash
-nvidia-smi --query-gpu=fan.speed,pcie.link.gen.current,pcie.link.width.current,driver_version --format=csv,noheader,nounits
+nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.width.current,driver_version --format=csv,noheader,nounits
 ```
 
 **Every second (refresh loop):** Only the fields that change
 ```bash
-nvidia-smi --query-gpu=temperature.gpu,power.draw,memory.used,memory.total --format=csv,noheader,nounits
+nvidia-smi --query-gpu=temperature.gpu,power.draw,memory.used,memory.total,fan.speed --format=csv,noheader,nounits
 ```
 
 This reduces each refresh by ~50% compared to querying all fields every cycle. Static data (fan, PCIe, driver) is preserved across refreshes.
@@ -263,7 +263,7 @@ swift build
 - **`NSPopover` popup** — used for the popup panel with transient behavior (click outside to dismiss).
 - **`nonisolated` refresh** — `SSHMonitor.refresh()` runs on `DispatchQueue.global` to avoid blocking the main thread. UI updates are dispatched back via `Task { @MainActor in }`.
 - **`waitWithTimeout`** — uses polling with `Thread.sleep` instead of `NotificationCenter` (which requires a runloop not available on background queues).
-- **Two-phase queries** — static metadata (driver, PCIe, fan) fetched once on connect; only live metrics (temp, power, memory) polled every second.
+- **Two-phase queries** — static metadata (driver, PCIe) fetched once on connect; live metrics (temp, power, memory, fan speed) polled every second.
 - **Keychain storage** — server credentials protected by macOS Keychain; automatic migration from UserDefaults on first run.
 - **Cached SSH args** — `AppSettings.sshArgs` (Keychain lookups) is cached at connect time, avoiding ~3 I/O operations per refresh cycle.
 - **Static font cache** — `NSFont` instances are cached in a static enum, eliminating per-frame allocations during menu bar redraws.

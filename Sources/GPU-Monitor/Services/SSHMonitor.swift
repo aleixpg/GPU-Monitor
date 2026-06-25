@@ -91,7 +91,7 @@ final class SSHMonitor {
 
     private nonisolated func fetchMetadata() {
         let p = sshProc()
-        p.arguments = ["-S", socketPath] + baseArgs + ["nvidia-smi --query-gpu=fan.speed,pcie.link.gen.current,pcie.link.width.current,driver_version --format=csv,noheader,nounits"]
+        p.arguments = ["-S", socketPath] + baseArgs + ["nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.width.current,driver_version --format=csv,noheader,nounits"]
         guard let (o, _) = runCmd(p) else { return }
         waitWithTimeout(for: p, seconds: 5)
         let lines = readPipe(o).components(separatedBy: "\n")
@@ -101,15 +101,13 @@ final class SSHMonitor {
             guard !pt.isEmpty else { continue }
             if i < gpus.count {
                 let e = gpus[i]
-                let fan: Int?
-                if pt.count >= 1, let v = Int(pt[0]), !pt[0].contains("Not") { fan = v } else { fan = e.fanPercent }
-                let pg = pt.count >= 2 ? Int(pt[1]) : e.pcieGen
-                let pw = pt.count >= 2 ? Int(pt[2]) : e.pcieWidth
+                let pg = pt.count >= 1 ? Int(pt[0]) : e.pcieGen
+                let pw = pt.count >= 2 ? Int(pt[1]) : e.pcieWidth
                 gpus[i] = GPUInfo(index: e.index, temperature: e.temperature,
                     power: e.power, memoryPercent: e.memoryPercent,
-                    fanPercent: fan, pcieGen: pg, pcieWidth: pw)
+                    fanPercent: e.fanPercent, pcieGen: pg, pcieWidth: pw)
             }
-            if pt.count >= 4 { drv = pt[3] }
+            if pt.count >= 3 { drv = pt[2] }
         }
         Task { @MainActor in self.gpus = gpus; self.driverVersion = drv }
     }
@@ -135,7 +133,7 @@ final class SSHMonitor {
 
     nonisolated func refresh() {
         let p = sshProc()
-        p.arguments = ["-S", socketPath] + baseArgs + ["nvidia-smi --query-gpu=temperature.gpu,power.draw,memory.used,memory.total --format=csv,noheader,nounits"]
+        p.arguments = ["-S", socketPath] + baseArgs + ["nvidia-smi --query-gpu=temperature.gpu,power.draw,memory.used,memory.total,fan.speed --format=csv,noheader,nounits"]
         guard let (out, err) = runCmd(p) else { return }
         waitWithTimeout(for: p, seconds: 5)
         let txt = readPipe(out)
@@ -195,9 +193,15 @@ final class SSHMonitor {
             let t = Int(p[0]) ?? 0, pw = Double(p[1]) ?? 0
             let mu = Double(p[2]) ?? 0, mt = max(Double(p[3]) ?? 1, 1)
             let e = existing.indices.contains(i) ? existing[i] : nil
+            let fan: Int?
+            if p.count >= 5, let v = Int(p[4]), !p[4].contains("Not") {
+                fan = v
+            } else {
+                fan = e?.fanPercent
+            }
             r.append(GPUInfo(index: i, temperature: t, power: pw,
                 memoryPercent: round(mu / mt * 1000) / 10,
-                fanPercent: e?.fanPercent, pcieGen: e?.pcieGen, pcieWidth: e?.pcieWidth))
+                fanPercent: fan, pcieGen: e?.pcieGen, pcieWidth: e?.pcieWidth))
         }
         return r
     }
