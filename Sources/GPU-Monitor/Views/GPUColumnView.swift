@@ -42,7 +42,7 @@ struct GPUColumnView: View {
                 Capsule()
                     .fill(Color.gray.opacity(0.2))
                     .frame(width: 56, height: 4)
-                    .overlay {
+                    .overlay(alignment: .leading) {
                         Capsule()
                             .fill(gpu.memColor)
                             .frame(width: max(2, 56 * gpu.memoryPercent / 100), height: 4)
