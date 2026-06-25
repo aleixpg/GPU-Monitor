@@ -66,7 +66,7 @@ final class SSHMonitor {
             let ok = out.contains("Master running")
             Task { @MainActor in
                 if ok {
-                    self.status = .connected; self.fetchMetadata(); self.startPolling()
+                    self.status = .connected; self.startPolling()
                 } else {
                     self.status = .error
                     self.errorMessage = out.isEmpty ? "Connection failed" : out
@@ -151,8 +151,12 @@ final class SSHMonitor {
                 if lost { scheduleReconnect() }
                 return
             }
+            let isFirstFetch = gpus.isEmpty
             gpus = parsed; lastUpdate = .now; reconnectDelay = 1
             NotificationCenter.default.post(name: .gpuDataChanged, object: nil)
+            if isFirstFetch {
+                self.fetchMetadata()
+            }
         }
     }
 
