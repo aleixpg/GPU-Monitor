@@ -2,6 +2,7 @@ import SwiftUI
 
 struct GPUPopupView: View {
     @Bindable var monitor: SSHMonitor
+    var onSettingsChange: (() -> Void)?
 
     // #3: Local state synced with Keychain-backed AppSettings on connect/save
     @State private var host: String
@@ -11,8 +12,9 @@ struct GPUPopupView: View {
     @AppStorage("compactMode") private var isCompactMode = false
     @State private var portFormatter = NumberFormatter()
 
-    init(monitor: SSHMonitor) {
+    init(monitor: SSHMonitor, onSettingsChange: (() -> Void)? = nil) {
         self.monitor = monitor
+        self.onSettingsChange = onSettingsChange
         _host = State(initialValue: AppSettings.host)
         _port = State(initialValue: AppSettings.port)
         _user = State(initialValue: AppSettings.user)
@@ -135,7 +137,7 @@ struct GPUPopupView: View {
             Toggle("Compact mode", isOn: $isCompactMode)
                 .toggleStyle(.switch)
                 .onChange(of: isCompactMode) {
-                    NotificationCenter.default.post(name: .gpuDataChanged, object: nil)
+                    onSettingsChange?()
                 }
 
             if monitor.status == .connected {

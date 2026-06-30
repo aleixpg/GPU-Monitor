@@ -261,7 +261,7 @@ swift build
 
 - **AppKit `NSStatusBar` + custom `NSView`** — SwiftUI's `MenuBarExtra` cannot render inline content in the menu bar. A custom `GPUStackView` using `draw(_:)` gives full control.
 - **`NSPopover` popup** — used for the popup panel with transient behavior (click outside to dismiss).
-- **`nonisolated` refresh** — `SSHMonitor.refresh()` runs on `DispatchQueue.global` to avoid blocking the main thread. UI updates are dispatched back via `Task { @MainActor in }`.
+- **Async poll loop** — `SSHMonitor` runs a serial `Task` loop on `@MainActor`; blocking SSH I/O runs in `Task.detached` so the menu bar stays responsive during timeouts.
 - **`waitWithTimeout`** — uses polling with `Thread.sleep` instead of `NotificationCenter` (which requires a runloop not available on background queues).
 - **Two-phase queries** — static metadata (driver, PCIe) fetched once on connect; live metrics (temp, power, memory, fan speed) polled every second.
 - **Keychain storage** — server credentials protected by macOS Keychain; automatic migration from UserDefaults on first run.

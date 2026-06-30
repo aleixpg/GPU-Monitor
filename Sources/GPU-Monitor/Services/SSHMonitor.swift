@@ -1,9 +1,8 @@
 import Foundation
 
-// O6: no raw value needed
 enum ConnectionStatus { case disconnected, connecting, connected, error }
 
-@Observable
+@MainActor @Observable
 final class SSHMonitor {
     var gpus: [GPUInfo] = []
     var status: ConnectionStatus = .disconnected
@@ -19,14 +18,17 @@ final class SSHMonitor {
         }
         return p
     }()
-    private var pollTimer: Timer?
-    private var reconnectDelay: TimeInterval = 1
 
+    private var pollTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    private var connectTask: Task<Void, Never>?
+    private var reconnectDelay: TimeInterval = 1
+    private var retryCount: Int = 0
     private var baseArgs: [String] = []
 
     // ─── Connect ───
 
-    func connect() {
+    func connect(isRetry: Bool = false) {
         guard status != .connecting, status != .connected else { return }
         guard AppSettings.hasConfig else {
             status = .error; errorMessage = "Configure server first"; return
@@ -39,39 +41,56 @@ final class SSHMonitor {
             return
         }
 
-        status = .connecting; errorMessage = nil; reconnectDelay = 1
+        connectTask?.cancel()
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        stopPolling()
+
+        if isRetry { teardownSocket() }
+
+        status = .connecting; errorMessage = nil
+        if !isRetry {
+            reconnectDelay = 1
+            retryCount = 0
+        }
         baseArgs = AppSettings.sshArgs
 
-        let mp = sshProc()
-        mp.arguments = ["-MN", "-S", socketPath, "-o", "ControlPersist=7200",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "UserKnownHostsFile=\(knownHostsPath)"] + baseArgs
-        mp.standardOutput = FileHandle.nullDevice; mp.standardError = FileHandle.nullDevice
+        let args = baseArgs
+        let socket = socketPath
+        let knownHosts = knownHostsPath
 
-        do {
-            try mp.run()
-        } catch {
-            status = .error; errorMessage = "Failed to start SSH"; scheduleReconnect(); return
-        }
+        connectTask = Task {
+            let masterErr = await Task.detached {
+                SSHBackend.startMaster(socketPath: socket, knownHostsPath: knownHosts, baseArgs: args)
+            }.value
+            guard !Task.isCancelled else { return }
 
-        let ba = baseArgs
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
-            let cp = self.sshProc()
-            cp.arguments = ["-S", self.socketPath, "-O", "check"] + ba
-            let (o, e) = (Pipe(), Pipe())
-            cp.standardOutput = o; cp.standardError = e
-            do { try cp.run() } catch { return }
-            waitWithTimeout(for: cp, seconds: 5)
-            let out = (self.readPipe(o) + self.readPipe(e)).trimmingCharacters(in: .whitespacesAndNewlines)
-            let ok = out.contains("Master running")
-            Task { @MainActor in
-                if ok {
-                    self.status = .connected; self.startPolling()
-                } else {
-                    self.status = .error
-                    self.errorMessage = out.isEmpty ? "Connection failed" : out
-                    self.scheduleReconnect()
-                }
+            if let msg = masterErr {
+                status = .error; errorMessage = msg
+                scheduleReconnect()
+                return
+            }
+
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+
+            let check = await Task.detached {
+                SSHBackend.checkMaster(socketPath: socket, baseArgs: args)
+            }.value
+            guard !Task.isCancelled else { return }
+
+            switch check {
+            case .running:
+                status = .connected
+                retryCount = 0; reconnectDelay = 1
+                startPolling()
+            case .notRunning:
+                status = .error
+                errorMessage = "Connection failed"
+                scheduleReconnect()
+            case .failed(let msg):
+                status = .error; errorMessage = msg
+                scheduleReconnect()
             }
         }
     }
@@ -79,113 +98,209 @@ final class SSHMonitor {
     // ─── Disconnect ───
 
     func disconnect() {
+        connectTask?.cancel(); connectTask = nil
+        reconnectTask?.cancel(); reconnectTask = nil
         stopPolling()
-        let c = sshProc()
-        c.arguments = ["-S", socketPath, "-O", "exit"] + baseArgs
-        try? c.run(); waitWithTimeout(for: c, seconds: 2)
-        try? FileManager.default.removeItem(atPath: socketPath)
-        status = .disconnected; errorMessage = nil; gpus = []; baseArgs = []
-    }
-
-    // ─── Metadata (once on connect) ───
-
-    private nonisolated func fetchMetadata() {
-        let p = sshProc()
-        p.arguments = ["-S", socketPath] + baseArgs + ["nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.width.current,driver_version --format=csv,noheader,nounits"]
-        guard let (o, _) = runCmd(p) else { return }
-        waitWithTimeout(for: p, seconds: 5)
-        let lines = readPipe(o).components(separatedBy: "\n")
-        var gpus = self.gpus; var drv: String?
-        for (i, line) in lines.enumerated() {
-            let pt = csv(line)
-            guard !pt.isEmpty else { continue }
-            if i < gpus.count {
-                let e = gpus[i]
-                let pg = pt.count >= 1 ? Int(pt[0]) : e.pcieGen
-                let pw = pt.count >= 2 ? Int(pt[1]) : e.pcieWidth
-                gpus[i] = GPUInfo(index: e.index, temperature: e.temperature,
-                    power: e.power, memoryPercent: e.memoryPercent,
-                    fanPercent: e.fanPercent, pcieGen: pg, pcieWidth: pw)
-            }
-            if pt.count >= 3 { drv = pt[2] }
-        }
-        Task { @MainActor in self.gpus = gpus; self.driverVersion = drv }
+        teardownSocket()
+        status = .disconnected; errorMessage = nil; gpus = []; driverVersion = nil
+        baseArgs = []; retryCount = 0; reconnectDelay = 1
     }
 
     // ─── Polling ───
 
     private func startPolling() {
-        stopPolling(); refresh()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
+        pollTask?.cancel()
+        pollTask = Task {
+            var fetchedMetadata = false
+            while !Task.isCancelled {
+                let args = baseArgs
+                let existing = gpus
+                let outcome = await SSHBackend.runPoll(args: args, socketPath: socketPath)
+                guard !Task.isCancelled else { break }
+
+                switch outcome {
+                case .success(let txt):
+                    status = .connected; errorMessage = nil
+                    gpus = SSHBackend.parseGPUs(txt, existing: existing)
+                    lastUpdate = .now; reconnectDelay = 1
+                    if !fetchedMetadata {
+                        fetchedMetadata = true
+                        await applyMetadata(args: args)
+                    }
+                case .connectionLost:
+                    handleConnectionLost()
+                    return
+                case .failure(let msg):
+                    handleError(msg)
+                    return
+                }
+
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
     }
 
-    private func stopPolling() { pollTimer?.invalidate(); pollTimer = nil }
+    private func stopPolling() {
+        pollTask?.cancel(); pollTask = nil
+    }
+
+    private func handleConnectionLost() {
+        stopPolling()
+        status = .error; errorMessage = "Connection lost"; gpus = []
+        scheduleReconnect()
+    }
+
+    private func handleError(_ msg: String) {
+        stopPolling()
+        status = .error; errorMessage = msg; gpus = []
+    }
 
     private func scheduleReconnect() {
+        guard reconnectTask == nil else { return }
+        stopPolling()
+
+        guard retryCount < 2 else {
+            status = .error
+            errorMessage = "Connection lost (retries exhausted)"
+            gpus = []
+            return
+        }
+
         let delay = reconnectDelay
-        DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
-            Task { @MainActor in self?.connect() }
-            self?.reconnectDelay = min(delay * 2, 30)
+        reconnectDelay = min(delay * 2, 30)
+        retryCount += 1
+
+        reconnectTask = Task {
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            reconnectTask = nil
+            connect(isRetry: true)
         }
     }
 
-    // ─── Refresh (1s loop) ───
+    private func applyMetadata(args: [String]) async {
+        let existing = gpus
+        let result = await SSHBackend.fetchMetadata(args: args, socketPath: socketPath, existing: existing)
+        guard !Task.isCancelled, status == .connected else { return }
+        gpus = result.gpus
+        driverVersion = result.driver
+    }
 
-    nonisolated func refresh() {
-        let p = sshProc()
-        p.arguments = ["-S", socketPath] + baseArgs + ["nvidia-smi --query-gpu=temperature.gpu,power.draw,memory.used,memory.total,fan.speed --format=csv,noheader,nounits"]
-        guard let (out, err) = runCmd(p) else { return }
-        waitWithTimeout(for: p, seconds: 5)
-        let txt = readPipe(out)
-        let rawErr = readPipe(err)
-        let lost = ["socket", "Connection", "Operation not possible", "Control socket connect"].contains { rawErr.contains($0) }
-        let parsed = parseGPUs(txt, existing: self.gpus, lost: lost)
-        let hasErr = lost || (p.terminationStatus != 0 && !rawErr.isEmpty)
+    private func teardownSocket() {
+        SSHBackend.teardownSocket(socketPath: socketPath, baseArgs: baseArgs)
+    }
+}
 
-        Task { @MainActor in
-            if hasErr {
-                status = .error
-                errorMessage = lost ? "Connection lost" : rawErr.isEmpty ? "Command failed" : rawErr
-                if lost { scheduleReconnect() }
-                return
+// ─── Background SSH (no MainActor) ───
+
+private enum SSHBackend {
+    static let connectionLostMarkers = [
+        "socket", "Connection", "Operation not possible", "Control socket connect"
+    ]
+
+    enum PollOutcome {
+        case success(String)
+        case connectionLost
+        case failure(String)
+    }
+
+    enum MasterCheck {
+        case running, notRunning, failed(String)
+    }
+
+    struct MetadataResult {
+        var gpus: [GPUInfo]
+        var driver: String?
+    }
+
+    static func startMaster(
+        socketPath: String, knownHostsPath: String, baseArgs: [String]
+    ) -> String? {
+        let mp = sshProc()
+        mp.arguments = ["-MN", "-S", socketPath, "-o", "ControlPersist=7200",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "UserKnownHostsFile=\(knownHostsPath)"] + baseArgs
+        mp.standardOutput = FileHandle.nullDevice
+        mp.standardError = FileHandle.nullDevice
+        do { try mp.run() } catch { return "Failed to start SSH" }
+        return nil
+    }
+
+    static func checkMaster(socketPath: String, baseArgs: [String]) -> MasterCheck {
+        let cp = sshProc()
+        cp.arguments = ["-S", socketPath, "-O", "check"] + baseArgs
+        let (o, e) = (Pipe(), Pipe())
+        cp.standardOutput = o; cp.standardError = e
+        do { try cp.run() } catch { return .failed("SSH check failed") }
+        waitWithTimeout(for: cp, seconds: 5)
+        let out = (readPipe(o) + readPipe(e)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return out.contains("Master running") ? .running : .notRunning
+    }
+
+    static func runPoll(args: [String], socketPath: String) async -> PollOutcome {
+        await Task.detached {
+            let p = sshProc()
+            p.arguments = ["-S", socketPath] + args + [
+                "nvidia-smi --query-gpu=temperature.gpu,power.draw,memory.used,memory.total,fan.speed --format=csv,noheader,nounits"
+            ]
+            let (out, err) = (Pipe(), Pipe())
+            p.standardOutput = out; p.standardError = err
+            do { try p.run() } catch { return .failure("SSH failed") }
+            waitWithTimeout(for: p, seconds: 5)
+            let txt = readPipe(out)
+            let rawErr = readPipe(err)
+            if connectionLostMarkers.contains(where: { rawErr.contains($0) }) {
+                return .connectionLost
             }
-            let isFirstFetch = gpus.isEmpty
-            gpus = parsed; lastUpdate = .now; reconnectDelay = 1
-            NotificationCenter.default.post(name: .gpuDataChanged, object: nil)
-            if isFirstFetch {
-                self.fetchMetadata()
+            if p.terminationStatus != 0, !rawErr.isEmpty {
+                return .failure(rawErr)
             }
+            return .success(txt)
+        }.value
+    }
+
+    static func fetchMetadata(
+        args: [String], socketPath: String, existing: [GPUInfo]
+    ) async -> MetadataResult {
+        await Task.detached {
+            let p = sshProc()
+            p.arguments = ["-S", socketPath] + args + [
+                "nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.width.current,driver_version --format=csv,noheader,nounits"
+            ]
+            let (o, _) = (Pipe(), Pipe())
+            p.standardOutput = o; p.standardError = Pipe()
+            guard (try? p.run()) != nil else { return MetadataResult(gpus: existing, driver: nil) }
+            waitWithTimeout(for: p, seconds: 5)
+            var gpus = existing
+            var drv: String?
+            for (i, line) in readPipe(o).components(separatedBy: "\n").enumerated() {
+                let pt = csv(line)
+                guard !pt.isEmpty else { continue }
+                if i < gpus.count {
+                    let e = gpus[i]
+                    let pg = pt.count >= 1 ? Int(pt[0]) : e.pcieGen
+                    let pw = pt.count >= 2 ? Int(pt[1]) : e.pcieWidth
+                    gpus[i] = GPUInfo(index: e.index, temperature: e.temperature,
+                        power: e.power, memoryPercent: e.memoryPercent,
+                        fanPercent: e.fanPercent, pcieGen: pg, pcieWidth: pw)
+                }
+                if pt.count >= 3 { drv = pt[2] }
+            }
+            return MetadataResult(gpus: gpus, driver: drv)
+        }.value
+    }
+
+    static func teardownSocket(socketPath: String, baseArgs: [String]) {
+        if !baseArgs.isEmpty {
+            let c = sshProc()
+            c.arguments = ["-S", socketPath, "-O", "exit"] + baseArgs
+            try? c.run()
+            waitWithTimeout(for: c, seconds: 2)
         }
+        try? FileManager.default.removeItem(atPath: socketPath)
     }
 
-    // ─── Helpers ───
-
-    private nonisolated func sshProc() -> Process {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        p.standardInput = FileHandle.nullDevice
-        return p
-    }
-
-    private nonisolated func runCmd(_ p: Process) -> (Pipe, Pipe)? {
-        let (o, e) = (Pipe(), Pipe()); p.standardOutput = o; p.standardError = e
-        do { try p.run() } catch {
-            Task { @MainActor in self.status = .error; self.errorMessage = "SSH failed"; self.scheduleReconnect() }
-            return nil
-        }
-        return (o, e)
-    }
-
-    private nonisolated func readPipe(_ p: Pipe) -> String {
-        String(data: p.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-    }
-
-    private nonisolated func csv(_ l: String) -> [String] {
-        l.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-    }
-
-    private nonisolated func parseGPUs(_ txt: String, existing: [GPUInfo], lost: Bool) -> [GPUInfo] {
-        guard !lost else { return [] }
+    static func parseGPUs(_ txt: String, existing: [GPUInfo]) -> [GPUInfo] {
         var r: [GPUInfo] = []
         for (i, l) in txt.components(separatedBy: "\n").enumerated() {
             let p = csv(l)
@@ -205,9 +320,22 @@ final class SSHMonitor {
         }
         return r
     }
-}
 
-extension Notification.Name { static let gpuDataChanged = Notification.Name("GPUDataChanged") }
+    private static func sshProc() -> Process {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        p.standardInput = FileHandle.nullDevice
+        return p
+    }
+
+    private static func readPipe(_ p: Pipe) -> String {
+        String(data: p.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    }
+
+    private static func csv(_ l: String) -> [String] {
+        l.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+}
 
 private func waitWithTimeout(for p: Process, seconds: TimeInterval) {
     let d = Date(timeIntervalSinceNow: seconds)

@@ -7,6 +7,7 @@ struct GPU_MonitorApp: App {
     var body: some Scene { MenuBarExtra("") {} }
 }
 
+@MainActor
 final class GPUAppDelegate: NSObject, NSApplicationDelegate {
     let monitor = SSHMonitor()
     private let statusItem = NSStatusBar.system.statusItem(withLength: -1)
@@ -26,13 +27,25 @@ final class GPUAppDelegate: NSObject, NSApplicationDelegate {
             statusItem.length = stack.frame.size.width
         }
 
-        NotificationCenter.default.addObserver(self, selector: #selector(updateStack),
-            name: .gpuDataChanged, object: nil)
+        observeMonitor()
+        updateStack()
         AppSettings.migrate()
         monitor.connect()
     }
 
-    @objc private func updateStack() {
+    private func observeMonitor() {
+        withObservationTracking {
+            _ = monitor.gpus
+            _ = monitor.status
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                self?.updateStack()
+                self?.observeMonitor()
+            }
+        }
+    }
+
+    private func updateStack() {
         stackView?.update(gpus: monitor.gpus, status: monitor.status)
         statusItem.length = stackView?.frame.size.width ?? statusItem.length
     }
@@ -47,7 +60,11 @@ final class GPUAppDelegate: NSObject, NSApplicationDelegate {
             let pop = NSPopover()
             pop.contentSize = NSSize(width: 320, height: 350)
             pop.behavior = .transient; pop.animates = false
-            pop.contentViewController = NSHostingController(rootView: GPUPopupView(monitor: monitor))
+            pop.contentViewController = NSHostingController(
+                rootView: GPUPopupView(monitor: monitor) { [weak self] in
+                    self?.updateStack()
+                }
+            )
             popover = pop
         }
         popover?.show(relativeTo: statusItem.button!.bounds, of: statusItem.button!, preferredEdge: .minY)
