@@ -20,11 +20,9 @@ final class GPUAppDelegate: NSObject, NSApplicationDelegate {
 
         if let button = statusItem.button {
             stack.frame = button.bounds
-            stack.frame.size.width = stack.computeWidth()
             stack.autoresizingMask = [.width, .height]
             button.addSubview(stack)
             button.action = #selector(togglePopover)
-            statusItem.length = stack.frame.size.width
         }
 
         observeMonitor()
@@ -33,10 +31,15 @@ final class GPUAppDelegate: NSObject, NSApplicationDelegate {
         monitor.connect()
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        monitor.disconnect()
+    }
+
     private func observeMonitor() {
         withObservationTracking {
             _ = monitor.gpus
             _ = monitor.status
+            _ = DisplaySettings.shared.isCompactMode
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.updateStack()
@@ -46,7 +49,11 @@ final class GPUAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStack() {
-        stackView?.update(gpus: monitor.gpus, status: monitor.status)
+        stackView?.update(
+            gpus: monitor.gpus,
+            status: monitor.status,
+            compact: DisplaySettings.shared.isCompactMode
+        )
         statusItem.length = stackView?.frame.size.width ?? statusItem.length
     }
 
@@ -61,9 +68,7 @@ final class GPUAppDelegate: NSObject, NSApplicationDelegate {
             pop.contentSize = NSSize(width: 320, height: 350)
             pop.behavior = .transient; pop.animates = false
             pop.contentViewController = NSHostingController(
-                rootView: GPUPopupView(monitor: monitor) { [weak self] in
-                    self?.updateStack()
-                }
+                rootView: GPUPopupView(monitor: monitor)
             )
             popover = pop
         }

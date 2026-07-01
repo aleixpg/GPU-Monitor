@@ -3,7 +3,6 @@ import Security
 
 enum AppSettings {
     private static let service = "com.gpu-monitor.app"
-    private static let compactModeKey = "compactMode"
 
     private static func kcQuery(_ a: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
@@ -33,11 +32,6 @@ enum AppSettings {
             if let v = UserDefaults.standard.string(forKey: ud), !v.isEmpty { kcSet(kc, v) }
             UserDefaults.standard.removeObject(forKey: ud)
         }
-    }
-
-    static var isCompactMode: Bool {
-        get { UserDefaults.standard.bool(forKey: compactModeKey) }
-        set { UserDefaults.standard.set(newValue, forKey: compactModeKey) }
     }
 
     static var host: String {

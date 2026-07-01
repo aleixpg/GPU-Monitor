@@ -2,19 +2,16 @@ import SwiftUI
 
 struct GPUPopupView: View {
     @Bindable var monitor: SSHMonitor
-    var onSettingsChange: (() -> Void)?
+    @Bindable private var display = DisplaySettings.shared
 
-    // #3: Local state synced with Keychain-backed AppSettings on connect/save
     @State private var host: String
     @State private var port: Int
     @State private var user: String
     @State private var sshKeyPath: String
-    @AppStorage("compactMode") private var isCompactMode = false
     @State private var portFormatter = NumberFormatter()
 
-    init(monitor: SSHMonitor, onSettingsChange: (() -> Void)? = nil) {
+    init(monitor: SSHMonitor) {
         self.monitor = monitor
-        self.onSettingsChange = onSettingsChange
         _host = State(initialValue: AppSettings.host)
         _port = State(initialValue: AppSettings.port)
         _user = State(initialValue: AppSettings.user)
@@ -134,11 +131,8 @@ struct GPUPopupView: View {
             .font(.body)
             .labelsHidden()
 
-            Toggle("Compact mode", isOn: $isCompactMode)
+            Toggle("Compact mode", isOn: $display.isCompactMode)
                 .toggleStyle(.switch)
-                .onChange(of: isCompactMode) {
-                    onSettingsChange?()
-                }
 
             if monitor.status == .connected {
                 Button(role: .destructive) {
@@ -151,7 +145,7 @@ struct GPUPopupView: View {
                 .controlSize(.small)
             } else if !host.isEmpty && !user.isEmpty {
                 Button {
-                    saveSettings() // #3: persist to Keychain before connecting
+                    saveSettings()
                     monitor.connect()
                 } label: {
                     Label("Connect", systemImage: "link")
@@ -175,10 +169,5 @@ struct GPUPopupView: View {
         }
         .padding(12)
         .frame(minWidth: 240)
-        .task {
-            if monitor.status == .disconnected, !host.isEmpty, !user.isEmpty {
-                monitor.connect()
-            }
-        }
     }
 }

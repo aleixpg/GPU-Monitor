@@ -4,8 +4,8 @@ import SwiftUI
 final class GPUStackView: NSView {
     private var gpus: [GPUInfo] = []
     private var status: ConnectionStatus = .disconnected
+    private var compact = false
 
-    // O3: cached fonts, static shared across instances
     private enum Fonts {
         static let compact = NSFont.systemFont(ofSize: 7, weight: .semibold)
         static let light = NSFont.systemFont(ofSize: 10, weight: .light)
@@ -20,30 +20,21 @@ final class GPUStackView: NSView {
     required init?(coder: NSCoder) { fatalError() }
     override func layout() { super.layout(); needsDisplay = true }
 
-    func update(gpus: [GPUInfo], status: ConnectionStatus) {
-        self.gpus = gpus; self.status = status
+    func update(gpus: [GPUInfo], status: ConnectionStatus, compact: Bool) {
+        self.gpus = gpus; self.status = status; self.compact = compact
         self.frame.size.width = computeWidth(); needsDisplay = true
     }
 
-    // O5: single layout calculation, used for width + drawing
     func computeWidth() -> CGFloat {
         if status != .connected || gpus.isEmpty {
             let a: [NSAttributedString.Key: Any] = [.font: Fonts.placeholder]
             return max(w("GPU", a), w("SSH", a)) + 12
         }
-        let compact = AppSettings.isCompactMode
-        let fc = compact ? Fonts.compact : Fonts.light
-        let f2 = Fonts.medium
-        var x: CGFloat = 6; let gap: CGFloat = 6
+        let layout = GPULayout(compact: compact)
+        var x: CGFloat = 6
         for (i, gp) in gpus.enumerated() {
-            if i > 0 { x += gap / 2 + 0.5 }
-            let strs = ["\(gp.temperature)°", "\(Int(gp.power))W", "\(Int(gp.memoryPercent))%"]
-            let cw = strs.map { w($0, [.font: fc]) }.max()! + (compact ? 0 : 2)
-            x += cw + gap
-            if !compact {
-                let lw = w("GPU \(gp.index)", [.font: Fonts.small])
-                x += max(w(strs[2], [.font: f2]), lw) + 2 + gap
-            }
+            if i > 0 { x += layout.separatorAdvance }
+            x += layout.columnWidth(for: gp)
         }
         return x
     }
@@ -52,41 +43,20 @@ final class GPUStackView: NSView {
         super.draw(dirtyRect)
         if status != .connected || gpus.isEmpty { drawPlaceholder(); return }
 
-        let compact = AppSettings.isCompactMode
+        let layout = GPULayout(compact: compact)
         let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let tc = dark ? NSColor.white : NSColor.black
-        let fc = compact ? Fonts.compact : Fonts.light
-        let f1 = Fonts.light
-        let f2 = Fonts.medium
-        var x: CGFloat = 6; let h = frame.height; let gap: CGFloat = 6
-        let yT = compact ? h - 8 : max(1, h / 2 - 1)
-        let yB = compact ? CGFloat(0) : max(0, yT - 9)
-        let yM = compact ? h / 2 - 4 : yB
-        let sepCol = (dark ? NSColor.white : NSColor.black).withAlphaComponent(0.2)
+        let sepCol = tc.withAlphaComponent(0.2)
+        var x: CGFloat = 6
+        let h = frame.height
 
         for (i, gp) in gpus.enumerated() {
             if i > 0 {
-                sepCol.set(); NSBezierPath(rect: NSRect(x: x - gap / 2 - 0.5, y: 2, width: 1, height: h - 4)).fill()
-                x += gap / 2 + 0.5
+                sepCol.set()
+                NSBezierPath(rect: NSRect(x: x - layout.gap / 2 - 0.5, y: 2, width: 1, height: h - 4)).fill()
+                x += layout.separatorAdvance
             }
-            let t = "\(gp.temperature)°", p = "\(Int(gp.power))W", m = "\(Int(gp.memoryPercent))%"
-            let cw = [t, p, m].map { w($0, [.font: fc]) }.max()! + (compact ? 0 : 2)
-
-            if compact {
-                t.draw(at: x, y: yT, f: fc, c: gp.tempColor.ns(), h: 8)
-                p.draw(at: x, y: yM, f: fc, c: tc, h: 8)
-                m.draw(at: x, y: yB, f: fc, c: gp.memColor.ns(), h: 8)
-                x += cw + gap
-            } else {
-                t.draw(at: x, y: yT, f: f1, c: gp.tempColor.ns())
-                p.draw(at: x, y: yB, f: f1, c: tc)
-                x += cw + gap
-                m.draw(at: x, y: yT, f: f2, c: gp.memColor.ns())
-                let ls = "GPU \(gp.index)"
-                ls.draw(at: x, y: yB, f: Fonts.small, c: tc.withAlphaComponent(0.5))
-                let lw = w(ls, [.font: Fonts.small])
-                x += max(w(m, [.font: f2]), lw) + 2 + gap
-            }
+            x = layout.draw(gpu: gp, at: x, height: h, textColor: tc) + layout.gap
         }
     }
 
@@ -106,6 +76,60 @@ final class GPUStackView: NSView {
 
     private func w(_ s: String, _ a: [NSAttributedString.Key: Any]) -> CGFloat {
         (s as NSString).size(withAttributes: a).width
+    }
+
+    private struct GPULayout {
+        let compact: Bool
+        let gap: CGFloat = 6
+
+        var separatorAdvance: CGFloat { gap / 2 + 0.5 }
+
+        private var fc: NSFont { compact ? Fonts.compact : Fonts.light }
+
+        private func strings(for gpu: GPUInfo) -> (temp: String, power: String, mem: String) {
+            ("\(gpu.temperature)°", "\(Int(gpu.power))W", "\(Int(gpu.memoryPercent))%")
+        }
+
+        private func primaryWidth(for gpu: GPUInfo) -> CGFloat {
+            let s = strings(for: gpu)
+            return [s.temp, s.power, s.mem].map { w($0, [.font: fc]) }.max()! + (compact ? 0 : 2)
+        }
+
+        func columnWidth(for gpu: GPUInfo) -> CGFloat {
+            let cw = primaryWidth(for: gpu)
+            if compact { return cw + gap }
+            let s = strings(for: gpu)
+            let lw = w("GPU \(gpu.index)", [.font: Fonts.small])
+            return cw + gap + max(w(s.mem, [.font: Fonts.medium]), lw) + 2 + gap
+        }
+
+        func draw(gpu: GPUInfo, at x: CGFloat, height h: CGFloat, textColor tc: NSColor) -> CGFloat {
+            let s = strings(for: gpu)
+            let cw = primaryWidth(for: gpu)
+            let yT = compact ? h - 8 : max(1, h / 2 - 1)
+            let yB = compact ? CGFloat(0) : max(0, yT - 9)
+            let yM = compact ? h / 2 - 4 : yB
+
+            if compact {
+                s.temp.draw(at: x, y: yT, f: fc, c: gpu.tempColor.ns(), h: 8)
+                s.power.draw(at: x, y: yM, f: fc, c: tc, h: 8)
+                s.mem.draw(at: x, y: yB, f: fc, c: gpu.memColor.ns(), h: 8)
+                return x + cw
+            } else {
+                s.temp.draw(at: x, y: yT, f: Fonts.light, c: gpu.tempColor.ns())
+                s.power.draw(at: x, y: yB, f: Fonts.light, c: tc)
+                let nx = x + cw + gap
+                s.mem.draw(at: nx, y: yT, f: Fonts.medium, c: gpu.memColor.ns())
+                let ls = "GPU \(gpu.index)"
+                ls.draw(at: nx, y: yB, f: Fonts.small, c: tc.withAlphaComponent(0.5))
+                let lw = w(ls, [.font: Fonts.small])
+                return nx + max(w(s.mem, [.font: Fonts.medium]), lw) + 2
+            }
+        }
+
+        private func w(_ s: String, _ a: [NSAttributedString.Key: Any]) -> CGFloat {
+            (s as NSString).size(withAttributes: a).width
+        }
     }
 }
 

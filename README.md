@@ -25,7 +25,7 @@ Full version:
 - **Detailed popup** — click the menu bar item to see per-GPU columns with progress bars and live settings
 - **Secure settings** — server credentials stored in macOS Keychain
 - **SSH host key verification** — remembers server fingerprints, detects MITM attacks
-- **Auto-reconnect** — exponential backoff if the SSH connection drops (1s → 2s → 4s → ... → 30s)
+- **Auto-reconnect** — up to 2 automatic retries with backoff (1s, then 2s) if the SSH connection drops; manual Reconnect after that
 - **Zero dock presence** — menu bar only app (`LSUIElement = true`)
 
 ---
@@ -78,6 +78,7 @@ Sources/GPU-Monitor/
 │   └── GPUInfo.swift            # GPU data model with color thresholds
 ├── Services/
 │   ├── AppSettings.swift        # Keychain-backed settings (host, port, user, key)
+│   ├── DisplaySettings.swift    # Observable compact-mode preference (UserDefaults)
 │   └── SSHMonitor.swift         # SSH ControlMaster, nvidia-smi parsing, refresh loop
 └── Views/
     ├── GPUColumnView.swift      # Per-GPU column with progress bar (popup)
@@ -128,7 +129,7 @@ nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.width.current,driver_vers
 nvidia-smi --query-gpu=temperature.gpu,power.draw,memory.used,memory.total,fan.speed --format=csv,noheader,nounits
 ```
 
-This reduces each refresh by ~50% compared to querying all fields every cycle. Static data (fan, PCIe, driver) is preserved across refreshes.
+The first poll cycle runs both queries back-to-back; every subsequent cycle sends only the lightweight query. PCIe link info and driver version are fetched once per session. Fan speed is part of the live poll (when the GPU reports it) and is preserved across refreshes when `nvidia-smi` returns `[N/A]`.
 
 ### Color Thresholds
 
@@ -147,8 +148,8 @@ The app renders directly in the menu bar using a custom `NSView` (`GPUStackView`
 - Row 1: temperature (color-coded) + memory % (color-coded)
 - Row 2: power (W) + GPU index label
 
-**Disconnected / Connecting** — shows "GPU/SSH" with appropriate styling.
-**Error** — shows "GPU/SSH Error" in red.
+**Disconnected / Connecting** — shows "GPU" and "SSH" on two lines with muted styling.
+**Error** — same placeholder layout with red text; details and Reconnect appear in the popup.
 
 Two display modes are available:
 - **Standard**: Full labels with "GPU N" identifiers
@@ -173,7 +174,7 @@ Server credentials (host, user, SSH key path) are stored in the macOS Keychain r
 - Automatic lock on screen lock
 - No plaintext storage on disk
 
-Non-sensitive preferences (port number, compact mode) remain in `UserDefaults` for convenience.
+Non-sensitive preferences (port number) remain in `UserDefaults` for convenience. Compact mode is stored in `UserDefaults` via the shared `DisplaySettings` observable, which the app delegate observes alongside GPU data so the menu bar layout updates immediately when toggled.
 
 ### SSH Key Validation
 
@@ -217,7 +218,7 @@ The menu bar display scales horizontally with each GPU. Separator lines divide G
 
 ### Connection Recovery
 
-If the remote server becomes unreachable, the app automatically attempts to reconnect with exponential backoff (1s → 2s → 4s → ... max 30s). A successful refresh resets the delay to 1s.
+If the SSH control socket is lost, polling stops immediately, GPU data is cleared, and the app retries automatically twice (after 1s, then 2s). If both retries fail, the popup shows "Connection lost (retries exhausted)" and the **Reconnect** button. A successful poll resets the retry counter and delay.
 
 ---
 
@@ -235,6 +236,7 @@ GPU-Monitor/
     │   └── GPUInfo.swift         # Data model + color logic
     ├── Services/
     │   ├── AppSettings.swift     # Keychain-backed settings + key validation
+    │   ├── DisplaySettings.swift # Observable compact-mode state
     │   └── SSHMonitor.swift      # SSH ControlMaster + two-phase nvidia-smi
     └── Views/
         ├── GPUColumnView.swift   # SwiftUI GPU column (popup)
@@ -264,6 +266,7 @@ swift build
 - **Async poll loop** — `SSHMonitor` runs a serial `Task` loop on `@MainActor`; blocking SSH I/O runs in `Task.detached` so the menu bar stays responsive during timeouts.
 - **`waitWithTimeout`** — uses polling with `Thread.sleep` instead of `NotificationCenter` (which requires a runloop not available on background queues).
 - **Two-phase queries** — static metadata (driver, PCIe) fetched once on connect; live metrics (temp, power, memory, fan speed) polled every second.
+- **`DisplaySettings` observable** — single source of truth for compact mode; observed by `GPUAppDelegate` so the menu bar redraws when the popup toggle changes, without callbacks.
 - **Keychain storage** — server credentials protected by macOS Keychain; automatic migration from UserDefaults on first run.
 - **Cached SSH args** — `AppSettings.sshArgs` (Keychain lookups) is cached at connect time, avoiding ~3 I/O operations per refresh cycle.
 - **Static font cache** — `NSFont` instances are cached in a static enum, eliminating per-frame allocations during menu bar redraws.
